@@ -1,0 +1,55 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Audio Clip Bench</title><style>*{box-sizing:border-box}body{margin:0;background:#f1f4f5;color:#182f3a;font:16px/1.5 "Segoe UI",sans-serif}main{max-width:880px;margin:5vh auto;background:white;padding:clamp(18px,5vw,44px);border-top:6px solid #216a77}h1{font:700 clamp(32px,5vw,48px)/1.1 Georgia,serif;margin:0}label{display:block;margin:12px 0}fieldset{border:1px solid #8babb0;padding:14px}input:not([type=checkbox]),select,audio{display:block;max-width:100%;width:100%;padding:8px;font:inherit}button{font:inherit;border:0;border-radius:4px;background:#175965;color:white;padding:9px 14px;margin:5px 0;cursor:pointer}button:disabled{opacity:.5}.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}table{border-collapse:collapse;width:100%}td,th{white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;padding:6px;border-bottom:1px solid #c1d2d5}#preview{max-height:40vh;overflow:auto}</style></head><body><main><h1>Audio Clip Bench</h1><p>Listen to a recording, set a time range and export the selected segment as a WAV file.</p><label>Recording<input id="file" type="file" accept="audio/*"></label><audio id="player" controls></audio><fieldset id="settings" disabled><legend>Clip boundaries · seconds</legend><div class="pair"><label>Start<input id="start" type="number" step="any" min="0" value="0"><button type="button" id="markStart">Use playhead for start</button></label><label>End<input id="end" type="number" step="any" min="0"><button type="button" id="markEnd">Use playhead for end</button></label></div><button id="listen">Play selection</button> <button id="save">Export WAV</button></fieldset><p id="status" role="status">Choose a recording to begin.</p></main><script>
+'use strict';
+const $=id=>document.getElementById(id);
+function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),30000)}
+
+let buffer,context,source,url,version=0;
+function stop(){if(source){source.onended=null;source.stop();source=null}}
+function bounds(){
+ const a=$('start').valueAsNumber,b=$('end').valueAsNumber;
+ if(!Number.isFinite(a)||!Number.isFinite(b)||a<0||b<=a||b>buffer.duration+1e-8)throw Error('Choose an end after the start and within the recording.');
+ const start=Math.round(a*buffer.sampleRate),end=Math.min(buffer.length,Math.round(b*buffer.sampleRate));
+ if(end<=start)throw Error('Select at least one audio sample.');
+ return [start,end];
+}
+$('file').onchange=async()=>{
+ const generation=++version;stop();buffer=null;$('settings').disabled=true;
+ const player=$('player');player.pause();player.removeAttribute('src');player.load();if(url)URL.revokeObjectURL(url);
+ const file=$('file').files[0];if(!file)return;
+ $('status').textContent='Decoding recording…';
+ try{
+  context??=new AudioContext();
+  const decoded=await context.decodeAudioData(await file.arrayBuffer());
+  if(generation!==version)return;
+  if(decoded.numberOfChannels>2)throw Error('Choose a mono or stereo recording.');
+  buffer=decoded;url=URL.createObjectURL(file);player.src=url;
+  $('start').value=0;$('end').value=buffer.duration;$('settings').disabled=false;
+  $('status').textContent=buffer.duration.toFixed(3)+' seconds · '+buffer.numberOfChannels+' channel(s) · '+buffer.sampleRate+' Hz';
+ }catch(e){if(generation===version)$('status').textContent='Could not load audio. '+e.message}
+};
+$('markStart').onclick=()=>{$('start').value=$('player').currentTime};
+$('markEnd').onclick=()=>{$('end').value=Math.min(buffer.duration,$('player').currentTime)};
+$('player').onplay=stop;
+$('listen').onclick=async()=>{
+ try{const [a,b]=bounds();const generation=version;await context.resume();if(generation!==version)return;
+ stop();$('player').pause();source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);
+ source.onended=()=>{source=null};source.start(0,a/buffer.sampleRate,(b-a)/buffer.sampleRate);
+ }catch(e){$('status').textContent=e.message}
+};
+$('save').onclick=()=>{
+ try{
+  const [a,b]=bounds(),ch=buffer.numberOfChannels,rate=buffer.sampleRate,size=(b-a)*ch*2;
+  if(size>0xffffffff-36)throw Error('Choose a shorter clip for WAV export.');
+  const bytes=new ArrayBuffer(44+size),view=new DataView(bytes);
+  const tag=(pos,s)=>{for(let i=0;i<s.length;i++)view.setUint8(pos+i,s.charCodeAt(i))};
+  tag(0,'RIFF');view.setUint32(4,36+size,true);tag(8,'WAVE');tag(12,'fmt ');
+  view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,ch,true);view.setUint32(24,rate,true);
+  view.setUint32(28,rate*ch*2,true);view.setUint16(32,ch*2,true);view.setUint16(34,16,true);tag(36,'data');view.setUint32(40,size,true);
+  const channels=Array.from({length:ch},(_,i)=>buffer.getChannelData(i));let pos=44;
+  for(let i=a;i<b;i++)for(const data of channels){
+   const n=Math.max(-1,Math.min(1,data[i]));view.setInt16(pos,Math.round(n*(n<0?32768:32767)),true);pos+=2;
+  }
+  download(new Blob([bytes],{type:'audio/wav'}),'clip.wav');$('status').textContent='Exported '+((b-a)/rate).toFixed(3)+' seconds.';
+ }catch(e){$('status').textContent=e.message}
+};
+</script></body></html>
